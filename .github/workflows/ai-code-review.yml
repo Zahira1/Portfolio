@@ -48,7 +48,7 @@ jobs:
           prompt = "You are a senior code reviewer. Review this git diff and provide:\n1. Summary of changes\n2. Bugs or issues\n3. Security concerns\n4. Suggestions\n5. Verdict: Approve / Request Changes\n\nDiff:\n" + diff
           payload = json.dumps({"contents": [{"parts": [{"text": prompt}]}]}).encode("utf-8")
           req = urllib.request.Request(
-              "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=" + api_key,
+              "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=" + api_key,
               data=payload,
               headers={"Content-Type": "application/json"},
               method="POST"

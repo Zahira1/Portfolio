@@ -27,7 +27,7 @@ jobs:
           fi
       - name: AI Review with Gemini
         env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           COMMIT_SHA: ${{ github.sha }}
@@ -35,7 +35,7 @@ jobs:
           head -c 8000 diff.txt > trimmed_diff.txt
           python3 << 'EOF'
           import os, json, urllib.request, urllib.error, sys
-          api_key = os.environ["GEMINI_API_KEY"]
+          api_key = os.environ["GEMINI"]
           github_token = os.environ["GITHUB_TOKEN"]
           repo = os.environ["REPO"]
           commit_sha = os.environ["COMMIT_SHA"]

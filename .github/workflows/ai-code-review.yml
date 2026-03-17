@@ -1,68 +1,78 @@
-
-name: AI Code Review
-
-on:
-  push:
-    branches: [main]
-  pull_request:
-    types: [opened, synchronize]
-
-jobs:
-  ai-review:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: write
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Get diff
-        run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            git diff origin/${{ github.base_ref }}...HEAD > diff.txt
-          else
-            git diff HEAD~1 HEAD > diff.txt
-          fi
-
-      - name: AI Review with Gemini
+- name: AI Review with Gemini
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.sha }}
         run: |
-          DIFF=$(cat diff.txt | head -c 8000)
+          # Save diff safely to a file
+          head -c 8000 diff.txt > trimmed_diff.txt
 
-          RESPONSE=$(curl -s -X POST \
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=$GEMINI_API_KEY" \
-            -H "Content-Type: application/json" \
-            -d "{
-              \"contents\": [{
-                \"parts\": [{
-                  \"text\": \"You are a senior code reviewer. Review this git diff and provide:\n1. Summary of changes\n2. Bugs or issues\n3. Security concerns\n4. Suggestions\n5. Verdict: Approve / Request Changes\n\nDiff:\n$DIFF\"
-                }]
-              }]
-            }")
-
-          REVIEW=$(echo $RESPONSE | python3 -c "
-          import sys, json
-          data = json.load(sys.stdin)
-          print(data['candidates'][0]['content']['parts'][0]['text'])
-          ")
-
-          echo "## 🤖 AI Code Review" > review_comment.md
-          echo "" >> review_comment.md
-          echo "$REVIEW" >> review_comment.md
-
-          if [ -n "$PR_NUMBER" ]; then
-            curl -s -X POST \
-              "https://api.github.com/repos/$REPO/issues/$PR_NUMBER/comments" \
-              -H "Authorization: Bearer $GITHUB_TOKEN" \
-              -H "Content-Type: application/json" \
-              -d "{\"body\": $(cat review_comment.md | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))')}"
+          if [ ! -s trimmed_diff.txt ]; then
+            echo "No diff found, skipping."
+            exit 0
           fi
 
-          cat review_comment.md
+          # Use Python to safely build + send the request (avoids JSON escaping issues)
+          python3 << 'EOF'
+          import os, json, urllib.request, urllib.error
+
+          api_key = os.environ["GEMINI_API_KEY"]
+          github_token = os.environ["GITHUB_TOKEN"]
+          repo = os.environ["REPO"]
+          commit_sha = os.environ["COMMIT_SHA"]
+
+          with open("trimmed_diff.txt", "r", errors="replace") as f:
+              diff = f.read()
+
+          prompt = f"""You are a senior code reviewer. Review this git diff and provide:
+          1. Summary of changes
+          2. Bugs or issues
+          3. Security concerns
+          4. Suggestions
+          5. Verdict: Approve / Request Changes
+
+          Diff:
+          {diff}"""
+
+          # Call Gemini
+          payload = json.dumps({
+              "contents": [{"parts": [{"text": prompt}]}]
+          }).encode("utf-8")
+
+          req = urllib.request.Request(
+              f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}",
+              data=payload,
+              headers={"Content-Type": "application/json"},
+              method="POST"
+          )
+
+          try:
+              with urllib.request.urlopen(req) as res:
+                  data = json.loads(res.read())
+                  review = data["candidates"][0]["content"]["parts"][0]["text"]
+          except urllib.error.HTTPError as e:
+              error_body = e.read().decode()
+              print(f"Gemini API error: {e.code} - {error_body}")
+              exit(1)
+
+          print("Review generated successfully!")
+          print(review)
+
+          # Post as commit comment
+          comment = f"## 🤖 AI Code Review\n\n{review}"
+          comment_payload = json.dumps({"body": comment}).encode("utf-8")
+
+          req2 = urllib.request.Request(
+              f"https://api.github.com/repos/{repo}/commits/{commit_sha}/comments",
+              data=comment_payload,
+              headers={
+                  "Authorization": f"Bearer {github_token}",
+                  "Content-Type": "application/json"
+              },
+              method="POST"
+          )
+
+          with urllib.request.urlopen(req2) as res2:
+              print("Comment posted to commit successfully!")
+          EOF

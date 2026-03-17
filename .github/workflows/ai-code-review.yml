@@ -3,10 +3,6 @@ on:
   push:
     branches:
       - main
-  pull_request:
-    types:
-      - opened
-      - synchronize
 jobs:
   ai-review:
     runs-on: ubuntu-latest
@@ -19,12 +15,17 @@ jobs:
         with:
           fetch-depth: 0
       - name: Get diff
+        run: git diff HEAD~1 HEAD > diff.txt
+      - name: List available models
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI }}
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            git diff origin/${{ github.base_ref }}...HEAD > diff.txt
-          else
-            git diff HEAD~1 HEAD > diff.txt
-          fi
+          curl -s "https://generativelanguage.googleapis.com/v1beta/models?key=$GEMINI_API_KEY" | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          for m in data.get('models', []):
+              print(m['name'])
+          "
       - name: AI Review with Gemini
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI }}

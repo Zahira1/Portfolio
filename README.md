@@ -1,4 +1,2 @@
 # Portfolio
-
-This is my portfolio. 
- this is a test 
+This is a portfolio of Shraddha Sharma. It is build using React, js and tailwind

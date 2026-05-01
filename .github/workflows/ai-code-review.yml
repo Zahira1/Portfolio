@@ -1,58 +1,202 @@
-name: AI Code Review
+name: AI Code Review (4 Models)
+
 on:
   push:
     branches:
       - main
+  pull_request:
+    branches:
+      - main
+
 jobs:
-  ai-review:
+  # ─── Step 1: Get the diff once, share it with all reviewers ───────────────
+  get-diff:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: write
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Get diff
-        run: git diff HEAD~1 HEAD > diff.txt
-      - name: List available models
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI }}
+
+      - name: Generate diff
         run: |
-          curl -s "https://generativelanguage.googleapis.com/v1beta/models?key=$GEMINI_API_KEY" | python3 -c "
-          import sys, json
-          data = json.load(sys.stdin)
-          for m in data.get('models', []):
-              print(m['name'])
-          "
-      - name: AI Review with Gemini
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git diff origin/${{ github.base_ref }}...HEAD > diff.txt
+          else
+            git diff HEAD~1 HEAD > diff.txt
+          fi
+          head -c 8000 diff.txt > trimmed_diff.txt
+
+      - name: Upload diff artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: diff
+          path: trimmed_diff.txt
+          retention-days: 1
+
+  # ─── Step 2a: Claude (Anthropic) ──────────────────────────────────────────
+  review-claude:
+    needs: get-diff
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Download diff
+        uses: actions/download-artifact@v4
+        with:
+          name: diff
+
+      - name: Review with Claude
         env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           COMMIT_SHA: ${{ github.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          head -c 8000 diff.txt > trimmed_diff.txt
           python3 << 'EOF'
           import os, json, urllib.request, urllib.error, sys
+
+          api_key = os.environ["ANTHROPIC_API_KEY"]
+          github_token = os.environ["GITHUB_TOKEN"]
+          repo = os.environ["REPO"]
+          commit_sha = os.environ["COMMIT_SHA"]
+          pr_number = os.environ.get("PR_NUMBER", "")
+
+          with open("trimmed_diff.txt", "r", errors="replace") as f:
+              diff = f.read()
+
+          if not diff.strip():
+              print("No diff found, skipping.")
+              sys.exit(0)
+
+          PROMPT = """You are a senior code reviewer. Review this git diff and provide:
+          1. **Summary** — what changed and why it matters
+          2. **Bugs / issues** — anything that could break or misbehave
+          3. **Security concerns** — hardcoded secrets, injection risks, auth gaps
+          4. **Suggestions** — improvements, readability, naming, tests
+          5. **Verdict** — one of: ✅ Approve | ⚠️ Approve with suggestions | ❌ Request Changes
+
+          Be specific. Cite line numbers where relevant. Format in markdown.
+
+          Diff:
+          """ + diff
+
+          payload = json.dumps({
+              "model": "claude-sonnet-4-20250514",
+              "max_tokens": 1500,
+              "messages": [{"role": "user", "content": PROMPT}]
+          }).encode("utf-8")
+
+          req = urllib.request.Request(
+              "https://api.anthropic.com/v1/messages",
+              data=payload,
+              headers={
+                  "Content-Type": "application/json",
+                  "x-api-key": api_key,
+                  "anthropic-version": "2023-06-01"
+              },
+              method="POST"
+          )
+
+          try:
+              with urllib.request.urlopen(req) as res:
+                  data = json.loads(res.read())
+                  review = data["content"][0]["text"]
+          except urllib.error.HTTPError as e:
+              print("Claude API error:", e.code, e.read().decode())
+              sys.exit(1)
+
+          # Save for aggregator
+          with open("claude_review.txt", "w") as f:
+              f.write(review)
+
+          comment = "## Claude Review (claude-sonnet-4)\n\n" + review
+          comment_payload = json.dumps({"body": comment}).encode("utf-8")
+
+          if pr_number:
+              url = f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments"
+          else:
+              url = f"https://api.github.com/repos/{repo}/commits/{commit_sha}/comments"
+
+          req2 = urllib.request.Request(
+              url,
+              data=comment_payload,
+              headers={"Authorization": f"Bearer {github_token}", "Content-Type": "application/json"},
+              method="POST"
+          )
+          with urllib.request.urlopen(req2):
+              print("Claude comment posted.")
+          EOF
+
+      - name: Upload Claude review
+        uses: actions/upload-artifact@v4
+        with:
+          name: review-claude
+          path: claude_review.txt
+          retention-days: 1
+
+  # ─── Step 2b: Gemini (Google) ─────────────────────────────────────────────
+  review-gemini:
+    needs: get-diff
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Download diff
+        uses: actions/download-artifact@v4
+        with:
+          name: diff
+
+      - name: Review with Gemini
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          python3 << 'EOF'
+          import os, json, urllib.request, urllib.error, sys
+
           api_key = os.environ["GEMINI_API_KEY"]
           github_token = os.environ["GITHUB_TOKEN"]
           repo = os.environ["REPO"]
           commit_sha = os.environ["COMMIT_SHA"]
+          pr_number = os.environ.get("PR_NUMBER", "")
+
           with open("trimmed_diff.txt", "r", errors="replace") as f:
               diff = f.read()
+
           if not diff.strip():
               print("No diff found, skipping.")
               sys.exit(0)
-          prompt = "You are a senior code reviewer. Review this git diff and provide:\n1. Summary of changes\n2. Bugs or issues\n3. Security concerns\n4. Suggestions\n5. Verdict: Approve / Request Changes\n\nDiff:\n" + diff
-          payload = json.dumps({"contents": [{"parts": [{"text": prompt}]}]}).encode("utf-8")
+
+          PROMPT = """You are a senior code reviewer. Review this git diff and provide:
+          1. **Summary** — what changed and why it matters
+          2. **Bugs / issues** — anything that could break or misbehave
+          3. **Security concerns** — hardcoded secrets, injection risks, auth gaps
+          4. **Suggestions** — improvements, readability, naming, tests
+          5. **Verdict** — one of: ✅ Approve | ⚠️ Approve with suggestions | ❌ Request Changes
+
+          Be specific. Cite line numbers where relevant. Format in markdown.
+
+          Diff:
+          """ + diff
+
+          payload = json.dumps({
+              "contents": [{"parts": [{"text": PROMPT}]}]
+          }).encode("utf-8")
+
           req = urllib.request.Request(
-              "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + api_key,
+              f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}",
               data=payload,
               headers={"Content-Type": "application/json"},
               method="POST"
           )
+
           try:
               with urllib.request.urlopen(req) as res:
                   data = json.loads(res.read())
@@ -60,15 +204,333 @@ jobs:
           except urllib.error.HTTPError as e:
               print("Gemini API error:", e.code, e.read().decode())
               sys.exit(1)
-          print(review)
-          comment = "## AI Code Review\n\n" + review
+
+          with open("gemini_review.txt", "w") as f:
+              f.write(review)
+
+          comment = "## Gemini Review (gemini-2.5-flash)\n\n" + review
           comment_payload = json.dumps({"body": comment}).encode("utf-8")
+
+          if pr_number:
+              url = f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments"
+          else:
+              url = f"https://api.github.com/repos/{repo}/commits/{commit_sha}/comments"
+
           req2 = urllib.request.Request(
-              "https://api.github.com/repos/" + repo + "/commits/" + commit_sha + "/comments",
+              url,
               data=comment_payload,
-              headers={"Authorization": "Bearer " + github_token, "Content-Type": "application/json"},
+              headers={"Authorization": f"Bearer {github_token}", "Content-Type": "application/json"},
               method="POST"
           )
-          with urllib.request.urlopen(req2) as res2:
-              print("Comment posted successfully!")
+          with urllib.request.urlopen(req2):
+              print("Gemini comment posted.")
+          EOF
+
+      - name: Upload Gemini review
+        uses: actions/upload-artifact@v4
+        with:
+          name: review-gemini
+          path: gemini_review.txt
+          retention-days: 1
+
+  # ─── Step 2c: GPT-4o (OpenAI) ─────────────────────────────────────────────
+  review-gpt:
+    needs: get-diff
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Download diff
+        uses: actions/download-artifact@v4
+        with:
+          name: diff
+
+      - name: Review with GPT-4o
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          python3 << 'EOF'
+          import os, json, urllib.request, urllib.error, sys
+
+          api_key = os.environ["OPENAI_API_KEY"]
+          github_token = os.environ["GITHUB_TOKEN"]
+          repo = os.environ["REPO"]
+          commit_sha = os.environ["COMMIT_SHA"]
+          pr_number = os.environ.get("PR_NUMBER", "")
+
+          with open("trimmed_diff.txt", "r", errors="replace") as f:
+              diff = f.read()
+
+          if not diff.strip():
+              print("No diff found, skipping.")
+              sys.exit(0)
+
+          PROMPT = """You are a senior code reviewer. Review this git diff and provide:
+          1. **Summary** — what changed and why it matters
+          2. **Bugs / issues** — anything that could break or misbehave
+          3. **Security concerns** — hardcoded secrets, injection risks, auth gaps
+          4. **Suggestions** — improvements, readability, naming, tests
+          5. **Verdict** — one of: ✅ Approve | ⚠️ Approve with suggestions | ❌ Request Changes
+
+          Be specific. Cite line numbers where relevant. Format in markdown.
+
+          Diff:
+          """ + diff
+
+          payload = json.dumps({
+              "model": "gpt-4o",
+              "max_tokens": 1500,
+              "messages": [
+                  {"role": "system", "content": "You are a senior software engineer doing a code review."},
+                  {"role": "user", "content": PROMPT}
+              ]
+          }).encode("utf-8")
+
+          req = urllib.request.Request(
+              "https://api.openai.com/v1/chat/completions",
+              data=payload,
+              headers={
+                  "Content-Type": "application/json",
+                  "Authorization": f"Bearer {api_key}"
+              },
+              method="POST"
+          )
+
+          try:
+              with urllib.request.urlopen(req) as res:
+                  data = json.loads(res.read())
+                  review = data["choices"][0]["message"]["content"]
+          except urllib.error.HTTPError as e:
+              print("OpenAI API error:", e.code, e.read().decode())
+              sys.exit(1)
+
+          with open("gpt_review.txt", "w") as f:
+              f.write(review)
+
+          comment = "## GPT-4o Review (OpenAI)\n\n" + review
+          comment_payload = json.dumps({"body": comment}).encode("utf-8")
+
+          if pr_number:
+              url = f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments"
+          else:
+              url = f"https://api.github.com/repos/{repo}/commits/{commit_sha}/comments"
+
+          req2 = urllib.request.Request(
+              url,
+              data=comment_payload,
+              headers={"Authorization": f"Bearer {github_token}", "Content-Type": "application/json"},
+              method="POST"
+          )
+          with urllib.request.urlopen(req2):
+              print("GPT-4o comment posted.")
+          EOF
+
+      - name: Upload GPT review
+        uses: actions/upload-artifact@v4
+        with:
+          name: review-gpt
+          path: gpt_review.txt
+          retention-days: 1
+
+  # ─── Step 2d: Copilot (GitHub Copilot Business API) ───────────────────────
+  review-copilot:
+    needs: get-diff
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Download diff
+        uses: actions/download-artifact@v4
+        with:
+          name: diff
+
+      - name: Review with GitHub Copilot
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          python3 << 'EOF'
+          import os, json, urllib.request, urllib.error, sys
+
+          github_token = os.environ["GITHUB_TOKEN"]
+          repo = os.environ["REPO"]
+          commit_sha = os.environ["COMMIT_SHA"]
+          pr_number = os.environ.get("PR_NUMBER", "")
+
+          with open("trimmed_diff.txt", "r", errors="replace") as f:
+              diff = f.read()
+
+          if not diff.strip():
+              print("No diff found, skipping.")
+              sys.exit(0)
+
+          PROMPT = """You are a senior code reviewer. Review this git diff and provide:
+          1. **Summary** — what changed and why it matters
+          2. **Bugs / issues** — anything that could break or misbehave
+          3. **Security concerns** — hardcoded secrets, injection risks, auth gaps
+          4. **Suggestions** — improvements, readability, naming, tests
+          5. **Verdict** — one of: ✅ Approve | ⚠️ Approve with suggestions | ❌ Request Changes
+
+          Be specific. Cite line numbers where relevant. Format in markdown.
+
+          Diff:
+          """ + diff
+
+          payload = json.dumps({
+              "model": "gpt-4o",
+              "messages": [
+                  {"role": "system", "content": "You are a senior software engineer doing a code review."},
+                  {"role": "user", "content": PROMPT}
+              ]
+          }).encode("utf-8")
+
+          # GitHub Copilot Business API endpoint
+          req = urllib.request.Request(
+              "https://api.githubcopilot.com/chat/completions",
+              data=payload,
+              headers={
+                  "Content-Type": "application/json",
+                  "Authorization": f"Bearer {github_token}",
+                  "Copilot-Integration-Id": "vscode-chat"
+              },
+              method="POST"
+          )
+
+          try:
+              with urllib.request.urlopen(req) as res:
+                  data = json.loads(res.read())
+                  review = data["choices"][0]["message"]["content"]
+          except urllib.error.HTTPError as e:
+              print("Copilot API error:", e.code, e.read().decode())
+              sys.exit(1)
+
+          with open("copilot_review.txt", "w") as f:
+              f.write(review)
+
+          comment = "## Copilot Review (GitHub Copilot Business)\n\n" + review
+          comment_payload = json.dumps({"body": comment}).encode("utf-8")
+
+          if pr_number:
+              url = f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments"
+          else:
+              url = f"https://api.github.com/repos/{repo}/commits/{commit_sha}/comments"
+
+          req2 = urllib.request.Request(
+              url,
+              data=comment_payload,
+              headers={"Authorization": f"Bearer {github_token}", "Content-Type": "application/json"},
+              method="POST"
+          )
+          with urllib.request.urlopen(req2):
+              print("Copilot comment posted.")
+          EOF
+
+      - name: Upload Copilot review
+        uses: actions/upload-artifact@v4
+        with:
+          name: review-copilot
+          path: copilot_review.txt
+          retention-days: 1
+
+  # ─── Step 3: Aggregate all reviews into a summary table ───────────────────
+  aggregate:
+    needs: [review-claude, review-gemini, review-gpt, review-copilot]
+    runs-on: ubuntu-latest
+    if: always()
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Download all reviews
+        uses: actions/download-artifact@v4
+        with:
+          pattern: review-*
+          merge-multiple: true
+
+      - name: Post comparison summary
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          python3 << 'EOF'
+          import os, json, urllib.request, sys, re
+
+          github_token = os.environ["GITHUB_TOKEN"]
+          repo = os.environ["REPO"]
+          commit_sha = os.environ["COMMIT_SHA"]
+          pr_number = os.environ.get("PR_NUMBER", "")
+
+          models = {
+              "Claude (Sonnet 4)":       "claude_review.txt",
+              "Gemini (2.5 Flash)":      "gemini_review.txt",
+              "GPT-4o (OpenAI)":         "gpt_review.txt",
+              "Copilot Business":        "copilot_review.txt",
+          }
+
+          def extract_verdict(text):
+              for line in text.splitlines():
+                  lower = line.lower()
+                  if "approve" in lower and "request" not in lower and "suggest" not in lower:
+                      return "✅ Approve"
+                  if "request changes" in lower or "request_changes" in lower:
+                      return "❌ Request Changes"
+                  if "approve with" in lower or "suggestion" in lower:
+                      return "⚠️ Approve with suggestions"
+              return "—"
+
+          def extract_summary(text):
+              lines = text.splitlines()
+              for i, line in enumerate(lines):
+                  if "summary" in line.lower():
+                      for j in range(i+1, min(i+5, len(lines))):
+                          if lines[j].strip():
+                              s = lines[j].strip().lstrip("-•*# ")
+                              return s[:120] + ("…" if len(s) > 120 else "")
+              return text.strip()[:120] + "…"
+
+          rows = []
+          for model, filename in models.items():
+              try:
+                  with open(filename, "r", errors="replace") as f:
+                      text = f.read()
+                  verdict = extract_verdict(text)
+                  summary = extract_summary(text)
+              except FileNotFoundError:
+                  verdict = "⏭️ Skipped"
+                  summary = "Review did not run or failed."
+              rows.append((model, verdict, summary))
+
+          table = "## AI Code Review — Summary\n\n"
+          table += "| Model | Verdict | Summary |\n"
+          table += "|-------|---------|----------|\n"
+          for model, verdict, summary in rows:
+              table += f"| **{model}** | {verdict} | {summary} |\n"
+
+          table += "\n> Each model's full review is posted as a separate comment above."
+
+          comment_payload = json.dumps({"body": table}).encode("utf-8")
+
+          if pr_number:
+              url = f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments"
+          else:
+              url = f"https://api.github.com/repos/{repo}/commits/{commit_sha}/comments"
+
+          req = urllib.request.Request(
+              url,
+              data=comment_payload,
+              headers={"Authorization": f"Bearer {github_token}", "Content-Type": "application/json"},
+              method="POST"
+          )
+          with urllib.request.urlopen(req):
+              print("Summary table posted.")
           EOF

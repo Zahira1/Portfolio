@@ -1,17 +1,35 @@
-import { useState } from 'react'
-import Footer from './Component/Footer'; 
-import About from './Component/About'; // adjust path if needed
-import './App.css'
+import Navbar from './Component/Navbar';
+import Hero from './Component/Hero';
+import About from './Component/About';
+import Work from './Component/Work';
+import Education from './Component/Education';
+import Skills from './Component/Skills';
+import Projects from './Component/Projects';
+import Contact from './Component/Contact';
+import Footer from './Component/Footer';
+import ScrollToTop from './Component/ScrollToTop';
+import './App.css';
 
 function App() {
-  const [count, setCount] = useState(0)
-
   return (
     <>
-      <About/>
+      <a href="#main-content" className="skip-link">
+        Skip to main content
+      </a>
+      <Navbar />
+      <main id="main-content">
+        <Hero />
+        <About />
+        <Work />
+        <Education />
+        <Skills />
+        <Projects />
+        <Contact />
+      </main>
       <Footer />
+      <ScrollToTop />
     </>
-  )
+  );
 }
 
-export default App
+export default App;

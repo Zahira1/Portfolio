@@ -39,7 +39,7 @@ jobs:
     needs: get-diff
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       pull-requests: write
     steps:
       - name: Download diff
@@ -146,6 +146,11 @@ jobs:
               headers={"Authorization": f"Bearer {github_token}", "Content-Type": "application/json"},
               method="POST"
           )
-          with urllib.request.urlopen(req2):
-              print("Gemini review comment posted.")
+          try:
+              with urllib.request.urlopen(req2):
+                  print("Gemini review comment posted.")
+          except urllib.error.HTTPError as e:
+              body = e.read().decode(errors="replace")
+              print("GitHub comment post error:", e.code, body)
+              sys.exit(1)
           EOF

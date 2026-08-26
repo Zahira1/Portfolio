@@ -1,4 +1,4 @@
-name: AI Code Review (TAMU AI)
+name: AI Code Review (Gemini)
 
 on:
   push:
@@ -34,8 +34,8 @@ jobs:
           path: trimmed_diff.txt
           retention-days: 1
 
-  # ─── Step 2: Review with TAMU AI (OpenAI-compatible API) ───────────────
-  review-tamu-ai:
+  # ─── Step 2: Review with Gemini ─────────────────────────────────────────
+  review-gemini:
     needs: get-diff
     runs-on: ubuntu-latest
     permissions:
@@ -47,23 +47,11 @@ jobs:
         with:
           name: diff
 
-      - name: Review with TAMU AI
+      - name: Review with Gemini
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAMU_AI_API_KEY: ${{ secrets.TAMU_AI_API_KEY }}
-          # chat.tfs.tamus.ai sits behind Cloudflare Access (SSO). A plain
-          # bearer token is not enough — Access intercepts the request before
-          # it reaches Open WebUI and returns an HTML login page. A Cloudflare
-          # Access "service token" (issued by whoever administers the Zero
-          # Trust app) is required to bypass the SSO wall for CI.
-          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
-          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
-          # This is an Open WebUI instance (confirmed via the account settings
-          # UI). Base URL is the site root, confirmed from the browser
-          # address bar: https://chat.tfs.tamus.ai
-          TAMU_AI_BASE_URL: ${{ vars.TAMU_AI_BASE_URL || 'https://chat.tfs.tamus.ai' }}
-          # Confirmed available in your account's model dropdown.
-          TAMU_AI_MODEL: ${{ vars.TAMU_AI_MODEL || 'gpt-4.1' }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-2.5-flash' }}
           REPO: ${{ github.repository }}
           COMMIT_SHA: ${{ github.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -72,11 +60,8 @@ jobs:
           import os, json, urllib.request, urllib.error, sys
 
           github_token = os.environ["GITHUB_TOKEN"]
-          tamu_api_key = os.environ["TAMU_AI_API_KEY"]
-          cf_client_id = os.environ.get("CF_ACCESS_CLIENT_ID", "")
-          cf_client_secret = os.environ.get("CF_ACCESS_CLIENT_SECRET", "")
-          base_url = os.environ["TAMU_AI_BASE_URL"].rstrip("/")
-          model = os.environ["TAMU_AI_MODEL"]
+          gemini_api_key = os.environ["GEMINI_API_KEY"]
+          model = os.environ["GEMINI_MODEL"]
           repo = os.environ["REPO"]
           commit_sha = os.environ["COMMIT_SHA"]
           pr_number = os.environ.get("PR_NUMBER", "")
@@ -109,33 +94,18 @@ jobs:
           """ + diff
 
           payload = json.dumps({
-              "model": model,
-              "stream": False,
-              "messages": [
-                  {"role": "system", "content": "You are a senior software engineer doing a code review."},
-                  {"role": "user", "content": PROMPT}
+              "contents": [
+                  {"parts": [{"text": PROMPT}]}
               ]
           }).encode("utf-8")
 
-          # Open WebUI's native chat completions endpoint (not /openai/...)
-          headers = {
-              "Content-Type": "application/json",
-              "Authorization": f"Bearer {tamu_api_key}",
-              # Cloudflare (fronting TAMU AI) blocks the default
-              # "Python-urllib/3.x" UA with error 1010. Use a normal UA.
-              "User-Agent": "Mozilla/5.0 (compatible; GitHubActions-CodeReview/1.0)",
-              "Accept": "application/json"
-          }
-          if cf_client_id and cf_client_secret:
-              # Cloudflare Access service token — bypasses the SSO login wall
-              # in front of chat.tfs.tamus.ai for non-interactive CI requests.
-              headers["CF-Access-Client-Id"] = cf_client_id
-              headers["CF-Access-Client-Secret"] = cf_client_secret
-
           req = urllib.request.Request(
-              f"{base_url}/api/chat/completions",
+              f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
               data=payload,
-              headers=headers,
+              headers={
+                  "Content-Type": "application/json",
+                  "x-goog-api-key": gemini_api_key,
+              },
               method="POST"
           )
 
@@ -145,34 +115,24 @@ jobs:
               try:
                   data = json.loads(raw)
               except json.JSONDecodeError:
-                  body_preview = raw.decode(errors="replace")[:1000]
-                  print("TAMU AI returned a non-JSON response (first 1000 chars):")
-                  print(body_preview)
-                  if "Cloudflare Access" in body_preview or "cloudflareaccess.com" in body_preview:
-                      print("This is a Cloudflare Access (SSO) login page, not the API.")
-                      print("CF_ACCESS_CLIENT_ID / CF_ACCESS_CLIENT_SECRET are missing, wrong,")
-                      print("or the service token wasn't granted access to this Access app.")
+                  print("Gemini returned a non-JSON response (first 1000 chars):")
+                  print(raw.decode(errors="replace")[:1000])
                   sys.exit(1)
               try:
-                  review = data["choices"][0]["message"]["content"]
+                  review = data["candidates"][0]["content"]["parts"][0]["text"]
               except (KeyError, IndexError, TypeError):
-                  print("Unexpected response shape from TAMU AI:")
+                  print("Unexpected response shape from Gemini:")
                   print(json.dumps(data, indent=2)[:1000])
                   sys.exit(1)
           except urllib.error.HTTPError as e:
               body = e.read().decode(errors="replace")
-              print("TAMU AI API error:", e.code, body)
-              if e.code == 403 and "1010" in body:
-                  print("This is a Cloudflare block (error 1010), not an API auth failure.")
-                  print("Check that TAMU_AI_BASE_URL is correct and that GitHub Actions runners")
-                  print("aren't being blocked outright by TAMU's WAF (may require an IP allowlist")
-                  print("exception or a different API gateway for programmatic/CI access).")
+              print("Gemini API error:", e.code, body)
               sys.exit(1)
           except urllib.error.URLError as e:
-              print("TAMU AI network error:", e.reason)
+              print("Gemini network error:", e.reason)
               sys.exit(1)
 
-          comment = "## TAMU AI Review\n\n" + review
+          comment = "## Gemini Code Review\n\n" + review
           comment_payload = json.dumps({"body": comment}).encode("utf-8")
 
           if pr_number:
@@ -187,5 +147,5 @@ jobs:
               method="POST"
           )
           with urllib.request.urlopen(req2):
-              print("TAMU AI review comment posted.")
+              print("Gemini review comment posted.")
           EOF

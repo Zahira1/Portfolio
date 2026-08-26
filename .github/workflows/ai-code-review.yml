@@ -1,4 +1,4 @@
-name: AI Code Review (Copilot)
+name: AI Code Review (TAMU AI)
 
 on:
   push:
@@ -34,8 +34,8 @@ jobs:
           path: trimmed_diff.txt
           retention-days: 1
 
-  # ─── Step 2: Copilot (GitHub Copilot Business API) ─────────────────────
-  review-copilot:
+  # ─── Step 2: Review with TAMU AI (OpenAI-compatible API) ───────────────
+  review-tamu-ai:
     needs: get-diff
     runs-on: ubuntu-latest
     permissions:
@@ -47,9 +47,16 @@ jobs:
         with:
           name: diff
 
-      - name: Review with GitHub Copilot
+      - name: Review with TAMU AI
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAMU_AI_API_KEY: ${{ secrets.TAMU_AI_API_KEY }}
+          # Verify this against your key/docs at https://docs.tamus.ai/ — some
+          # accounts are provisioned under chat-api.tamu.ai, others under a
+          # tamus.ai subdomain. Update if your key page shows something different.
+          TAMU_AI_BASE_URL: ${{ vars.TAMU_AI_BASE_URL || 'https://chat-api.tamu.ai/openai' }}
+          # Verify the exact model slug in your TAMU AI account's model list.
+          TAMU_AI_MODEL: ${{ vars.TAMU_AI_MODEL || 'gpt-4o' }}
           REPO: ${{ github.repository }}
           COMMIT_SHA: ${{ github.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -58,6 +65,9 @@ jobs:
           import os, json, urllib.request, urllib.error, sys
 
           github_token = os.environ["GITHUB_TOKEN"]
+          tamu_api_key = os.environ["TAMU_AI_API_KEY"]
+          base_url = os.environ["TAMU_AI_BASE_URL"].rstrip("/")
+          model = os.environ["TAMU_AI_MODEL"]
           repo = os.environ["REPO"]
           commit_sha = os.environ["COMMIT_SHA"]
           pr_number = os.environ.get("PR_NUMBER", "")
@@ -69,6 +79,14 @@ jobs:
               print("No diff found, skipping.")
               sys.exit(0)
 
+          truncated_note = ""
+          try:
+              full_size = os.path.getsize("diff.txt") if os.path.exists("diff.txt") else len(diff)
+          except OSError:
+              full_size = len(diff)
+          if full_size > 8000:
+              truncated_note = "\n\n[NOTE: This diff was truncated to 8000 characters. It may be incomplete — do not assume the shown portion is the full change.]\n"
+
           PROMPT = """You are a senior code reviewer. Review this git diff and provide:
           1. **Summary** — what changed and why it matters
           2. **Bugs / issues** — anything that could break or misbehave
@@ -77,26 +95,25 @@ jobs:
           5. **Verdict** — one of: ✅ Approve | ⚠️ Approve with suggestions | ❌ Request Changes
 
           Be specific. Cite line numbers where relevant. Format in markdown.
-
+          """ + truncated_note + """
           Diff:
           """ + diff
 
           payload = json.dumps({
-              "model": "gpt-4o",
+              "model": model,
               "messages": [
                   {"role": "system", "content": "You are a senior software engineer doing a code review."},
                   {"role": "user", "content": PROMPT}
               ]
           }).encode("utf-8")
 
-          # GitHub Copilot Business API endpoint
+          # TAMU AI OpenAI-compatible chat completions endpoint
           req = urllib.request.Request(
-              "https://api.githubcopilot.com/chat/completions",
+              f"{base_url}/chat/completions",
               data=payload,
               headers={
                   "Content-Type": "application/json",
-                  "Authorization": f"Bearer {github_token}",
-                  "Copilot-Integration-Id": "vscode-chat"
+                  "Authorization": f"Bearer {tamu_api_key}"
               },
               method="POST"
           )
@@ -106,10 +123,10 @@ jobs:
                   data = json.loads(res.read())
                   review = data["choices"][0]["message"]["content"]
           except urllib.error.HTTPError as e:
-              print("Copilot API error:", e.code, e.read().decode())
+              print("TAMU AI API error:", e.code, e.read().decode())
               sys.exit(1)
 
-          comment = "## Copilot Review (GitHub Copilot Business)\n\n" + review
+          comment = "## TAMU AI Review\n\n" + review
           comment_payload = json.dumps({"body": comment}).encode("utf-8")
 
           if pr_number:
@@ -124,5 +141,5 @@ jobs:
               method="POST"
           )
           with urllib.request.urlopen(req2):
-              print("Copilot comment posted.")
+              print("TAMU AI review comment posted.")
           EOF

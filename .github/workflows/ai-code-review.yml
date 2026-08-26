@@ -51,12 +51,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAMU_AI_API_KEY: ${{ secrets.TAMU_AI_API_KEY }}
-          # Verify this against your key/docs at https://docs.tamus.ai/ — some
-          # accounts are provisioned under chat-api.tamu.ai, others under a
-          # tamus.ai subdomain. Update if your key page shows something different.
-          TAMU_AI_BASE_URL: ${{ vars.TAMU_AI_BASE_URL || 'https://chat-api.tamu.ai/openai' }}
-          # Verify the exact model slug in your TAMU AI account's model list.
-          TAMU_AI_MODEL: ${{ vars.TAMU_AI_MODEL || 'gpt-4o' }}
+          # This is an Open WebUI instance (confirmed via the account settings
+          # UI). Base URL is the site root, confirmed from the browser
+          # address bar: https://chat.tfs.tamus.ai
+          TAMU_AI_BASE_URL: ${{ vars.TAMU_AI_BASE_URL || 'https://chat.tfs.tamus.ai' }}
+          # Confirmed available in your account's model dropdown.
+          TAMU_AI_MODEL: ${{ vars.TAMU_AI_MODEL || 'gpt-4.1' }}
           REPO: ${{ github.repository }}
           COMMIT_SHA: ${{ github.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -107,9 +107,9 @@ jobs:
               ]
           }).encode("utf-8")
 
-          # TAMU AI OpenAI-compatible chat completions endpoint
+          # Open WebUI's native chat completions endpoint (not /openai/...)
           req = urllib.request.Request(
-              f"{base_url}/chat/completions",
+              f"{base_url}/api/chat/completions",
               data=payload,
               headers={
                   "Content-Type": "application/json",

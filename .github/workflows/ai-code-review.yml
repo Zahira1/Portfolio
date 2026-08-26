@@ -113,17 +113,30 @@ jobs:
               data=payload,
               headers={
                   "Content-Type": "application/json",
-                  "Authorization": f"Bearer {tamu_api_key}"
+                  "Authorization": f"Bearer {tamu_api_key}",
+                  # Cloudflare (fronting TAMU AI) blocks the default
+                  # "Python-urllib/3.x" UA with error 1010. Use a normal UA.
+                  "User-Agent": "Mozilla/5.0 (compatible; GitHubActions-CodeReview/1.0)",
+                  "Accept": "application/json"
               },
               method="POST"
           )
 
           try:
-              with urllib.request.urlopen(req) as res:
+              with urllib.request.urlopen(req, timeout=60) as res:
                   data = json.loads(res.read())
                   review = data["choices"][0]["message"]["content"]
           except urllib.error.HTTPError as e:
-              print("TAMU AI API error:", e.code, e.read().decode())
+              body = e.read().decode(errors="replace")
+              print("TAMU AI API error:", e.code, body)
+              if e.code == 403 and "1010" in body:
+                  print("This is a Cloudflare block (error 1010), not an API auth failure.")
+                  print("Check that TAMU_AI_BASE_URL is correct and that GitHub Actions runners")
+                  print("aren't being blocked outright by TAMU's WAF (may require an IP allowlist")
+                  print("exception or a different API gateway for programmatic/CI access).")
+              sys.exit(1)
+          except urllib.error.URLError as e:
+              print("TAMU AI network error:", e.reason)
               sys.exit(1)
 
           comment = "## TAMU AI Review\n\n" + review
